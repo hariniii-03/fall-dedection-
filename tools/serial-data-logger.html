@@ -1,0 +1,1040 @@
+<!doctype html>
+<!--
+  Serial Data Logger
+  -------------------
+  Logs CSV-style lines (e.g. "value1,value2,value3\n") from a
+  microcontroller over USB using the Web Serial API.
+
+  Requirements:
+  - Chromium-based browser only (Chrome, Edge). Firefox/Safari do not
+    support Web Serial.
+  - Must be served over HTTPS or from localhost/file:// -- Web Serial
+    is blocked on plain HTTP.
+  - Must be opened as a direct browser tab, not embedded in an iframe,
+    or the permission prompt will not appear reliably.
+-->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Serial Data Logger</title>
+<style>
+  :root {
+    --bg: #f5f6f8;
+    --panel: #ffffff;
+    --border: #d8dbe0;
+    --text: #1c1e21;
+    --muted: #6b7280;
+    --accent: #2563eb;
+    --accent-hover: #1d4ed8;
+    --danger: #dc2626;
+    --danger-hover: #b91c1c;
+    --ok: #16a34a;
+    --ok-hover: #128a3e;
+    --warn: #d97706;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 24px;
+    font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+  }
+  h1 { font-size: 20px; margin: 0 0 16px; }
+  h2 { font-size: 14px; margin: 0 0 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+  .container { max-width: 1280px; margin: 0 auto; }
+
+  .layout {
+    display: grid;
+    grid-template-columns: 360px 1fr;
+    gap: 16px;
+    align-items: stretch;
+  }
+  .left-col {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+  .live-monitor-panel {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+  .full-width { grid-column: 1 / -1; }
+
+  @media (max-width: 860px) {
+    .layout { grid-template-columns: 1fr; }
+  }
+
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 18px 20px;
+  }
+  .row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 14px;
+    align-items: flex-end;
+  }
+  .field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .field label {
+    font-size: 12px;
+    color: var(--muted);
+    display: flex;
+    align-items: center;
+    gap: 5px;
+  }
+  .help-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: #dbe0e6;
+    color: #4b5563;
+    font-size: 10px;
+    font-style: normal;
+    font-weight: 700;
+    cursor: help;
+    flex-shrink: 0;
+  }
+  .field-hint {
+    font-size: 11px;
+    color: #9aa1ab;
+    margin-top: 3px;
+  }
+  input[type="text"], input[type="number"], select {
+    padding: 7px 9px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-size: 13px;
+    min-width: 120px;
+  }
+  button {
+    padding: 8px 14px;
+    border: none;
+    border-radius: 6px;
+    background: var(--accent);
+    color: white;
+    font-size: 13px;
+    cursor: pointer;
+    font-weight: 500;
+    transition: background 0.15s;
+  }
+  button:hover:not(:disabled) { background: var(--accent-hover); }
+  button:disabled { background: #b9c2cf; cursor: not-allowed; }
+  button.danger:not(:disabled) { background: var(--danger); }
+  button.danger:hover:not(:disabled) { background: var(--danger-hover); }
+  button.secondary:not(:disabled) { background: #6b7280; }
+  button.secondary:hover:not(:disabled) { background: #4b5563; }
+
+  #startStopBtn.state-start:not(:disabled) { background: var(--ok); }
+  #startStopBtn.state-start:not(:disabled):hover { background: var(--ok-hover); }
+  #startStopBtn.state-stop:not(:disabled) { background: var(--danger); }
+  #startStopBtn.state-stop:not(:disabled):hover { background: var(--danger-hover); }
+
+  .status-line {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    font-weight: 500;
+  }
+  .dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--danger);
+    display: inline-block;
+    flex-shrink: 0;
+  }
+  .dot.connected { background: var(--ok); }
+  .dot.connecting { background: var(--warn); }
+
+  .field-labels-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 10px;
+  }
+  .field-labels-grid input { width: 110px; }
+
+  .live-monitor {
+    background: #0f1115;
+    color: #9be89b;
+    font-family: ui-monospace, Consolas, monospace;
+    font-size: 12.5px;
+    padding: 12px 14px;
+    border-radius: 6px;
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    white-space: pre-wrap;
+  }
+
+  .counter-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 10px;
+  }
+  .counter-row span { font-size: 13px; color: var(--muted); }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+  }
+  thead th {
+    text-align: left;
+    background: #f0f1f3;
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--border);
+    position: sticky;
+    top: 0;
+  }
+  tbody td {
+    padding: 5px 8px;
+    border-bottom: 1px solid #eef0f2;
+  }
+  tbody tr:hover { background: #fafbfc; }
+  .table-scroll {
+    max-height: 420px;
+    overflow-y: auto;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+  .row-del-btn {
+    background: transparent;
+    color: var(--danger);
+    padding: 2px 6px;
+    font-size: 14px;
+    line-height: 1;
+  }
+  .row-del-btn:hover:not(:disabled) { background: #fde8e8; }
+
+  .toast-container {
+    position: fixed;
+    bottom: 20px;
+    right: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    z-index: 999;
+  }
+  .toast {
+    background: #1c1e21;
+    color: white;
+    padding: 10px 16px;
+    border-radius: 6px;
+    font-size: 13px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+    opacity: 0;
+    transform: translateY(8px);
+    transition: opacity 0.2s, transform 0.2s;
+  }
+  .toast.show { opacity: 1; transform: translateY(0); }
+
+  .empty-state {
+    padding: 24px;
+    text-align: center;
+    color: var(--muted);
+    font-size: 13px;
+  }
+
+  .unsupported {
+    background: #fff4e5;
+    border: 1px solid #f5c46c;
+    color: #7a4d00;
+    padding: 12px 16px;
+    border-radius: 8px;
+    margin-bottom: 16px;
+    font-size: 13px;
+  }
+
+  .chart-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 10px;
+  }
+  .chart-legend-chip {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: #f7f8fa;
+    font-size: 12px;
+    cursor: pointer;
+    user-select: none;
+  }
+  .chart-legend-chip.off {
+    opacity: 0.4;
+  }
+  .chart-legend-swatch {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .chart-hint {
+    font-size: 12px;
+    color: var(--muted);
+    margin-bottom: 10px;
+  }
+  .chart-canvas-wrap {
+    position: relative;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: #fff;
+  }
+  #chartCanvas {
+    display: block;
+    width: 100%;
+    height: 260px;
+    cursor: crosshair;
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>Serial Data Logger</h1>
+
+  <div id="unsupportedBanner" class="unsupported" hidden>
+    Web Serial API is not available in this browser. Please open this page in
+    Chrome or Edge (desktop), served over HTTPS or from a local file/localhost.
+  </div>
+
+  <div class="layout">
+    <div class="left-col">
+      <!-- Connection -->
+      <div class="panel">
+        <h2>Connection</h2>
+        <div class="row">
+          <div class="field">
+            <label for="baudRate">Baud rate <span class="help-icon" title="How fast data moves over the USB connection, measured in bits per second. This number must exactly match the value inside Serial.begin(...) in your microcontroller's code -- if it doesn't match, you'll see garbled text or nothing at all. 115200 is the standard default for most Arduino/ESP32 sketches.">?</span></label>
+            <select id="baudRate">
+              <option value="9600">9600</option>
+              <option value="19200">19200</option>
+              <option value="38400">38400</option>
+              <option value="57600">57600</option>
+              <option value="115200" selected>115200</option>
+              <option value="230400">230400</option>
+              <option value="460800">460800</option>
+              <option value="921600">921600</option>
+            </select>
+            <span class="field-hint">Must match Serial.begin() in your sketch</span>
+          </div>
+          <div class="field">
+            <label>&nbsp;</label>
+            <button id="connectBtn" style="min-width: 140px;">Connect Serial</button>
+          </div>
+        </div>
+        <div class="row" style="margin-top: 12px;">
+          <div class="status-line">
+            <span id="statusDot" class="dot"></span>
+            <span id="statusText">Disconnected</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Configuration -->
+      <div class="panel">
+        <h2>Data Configuration</h2>
+        <div class="row">
+          <div class="field" style="flex: 1;">
+            <label for="fileName">File name</label>
+            <input type="text" id="fileName" placeholder="sensor_data">
+          </div>
+          <div class="field">
+            <label for="numFields">Number of fields</label>
+            <input type="number" id="numFields" min="1" max="20" value="6">
+          </div>
+        </div>
+        <label style="font-size:12px; color: var(--muted); display:block; margin-top:12px;">Field labels (click to rename)</label>
+        <div id="fieldLabelsGrid" class="field-labels-grid"></div>
+      </div>
+    </div>
+
+    <!-- Live Monitor -->
+    <div class="panel live-monitor-panel">
+      <h2>Live Monitor</h2>
+      <div id="liveMonitor" class="live-monitor"></div>
+    </div>
+
+    <!-- Data Chart -->
+    <div class="panel full-width">
+      <h2>Data Chart</h2>
+      <div class="chart-hint">Each field is scaled independently so its shape is visible regardless of units. Click a legend chip to hide/show a field. Click and drag on the chart to select a range of rows, then use "Delete Selected" below to remove them.</div>
+      <div id="chartLegend" class="chart-legend"></div>
+      <div class="chart-canvas-wrap">
+        <canvas id="chartCanvas"></canvas>
+      </div>
+    </div>
+
+    <!-- Captured Data -->
+    <div class="panel full-width">
+      <h2>Captured Data</h2>
+      <div class="row" style="margin-bottom: 14px;">
+        <button id="startStopBtn" class="state-start" disabled>Start Logging</button>
+        <button id="downloadBtn" class="secondary" disabled>Download CSV</button>
+        <button id="loadCsvBtn" class="secondary">Load CSV</button>
+        <input type="file" id="loadCsvInput" accept=".csv,text/csv" style="display:none;">
+      </div>
+      <div class="counter-row">
+        <span id="rowCounter">0 rows captured</span>
+        <div style="display:flex; gap:8px;">
+          <button id="deleteSelectedBtn" class="danger" disabled>Delete Selected</button>
+          <button id="clearAllBtn" class="danger" disabled>Clear All</button>
+        </div>
+      </div>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr id="tableHeadRow"></tr>
+          </thead>
+          <tbody id="tableBody"></tbody>
+        </table>
+        <div id="emptyState" class="empty-state">No data captured yet.</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="toast-container" id="toastContainer"></div>
+
+<script>
+(function () {
+  'use strict';
+
+  // ---- State ----
+  let port = null;
+  let reader = null;
+  let readableStreamClosed = null;
+  let keepReading = false;
+  let isLogging = false;
+  let lineBuffer = '';
+  let fieldLabels = ['ax', 'ay', 'az', 'gx', 'gy', 'gz'];
+  /** @type {string[][]} */
+  let data = [];
+  /** @type {Set<number>} indices into `data` currently checked for bulk delete */
+  let selectedRows = new Set();
+  /** @type {Set<number>} field indices currently shown on the chart */
+  let visibleFields = new Set();
+  let chartDrag = null; // { startIndex, currentIndex } while dragging a selection
+  let chartRenderScheduled = false;
+  const CHART_COLORS = ['#2563eb', '#dc2626', '#16a34a', '#d97706', '#7c3aed', '#0891b2', '#db2777', '#65a30d'];
+  const MAX_CHART_POINTS = 1500;
+  /** @type {string[][]} rows pushed into `data` but not yet appended to the DOM table */
+  let pendingRows = [];
+  let tableFlushScheduled = false;
+
+  // ---- DOM refs ----
+  const unsupportedBanner = document.getElementById('unsupportedBanner');
+  const baudRateEl = document.getElementById('baudRate');
+  const connectBtn = document.getElementById('connectBtn');
+  const statusDot = document.getElementById('statusDot');
+  const statusText = document.getElementById('statusText');
+  const fileNameEl = document.getElementById('fileName');
+  const numFieldsEl = document.getElementById('numFields');
+  const fieldLabelsGrid = document.getElementById('fieldLabelsGrid');
+  const startStopBtn = document.getElementById('startStopBtn');
+  const downloadBtn = document.getElementById('downloadBtn');
+  const loadCsvBtn = document.getElementById('loadCsvBtn');
+  const loadCsvInput = document.getElementById('loadCsvInput');
+  const rowCounter = document.getElementById('rowCounter');
+  const liveMonitor = document.getElementById('liveMonitor');
+  const tableHeadRow = document.getElementById('tableHeadRow');
+  const tableBody = document.getElementById('tableBody');
+  const emptyState = document.getElementById('emptyState');
+  const deleteSelectedBtn = document.getElementById('deleteSelectedBtn');
+  const clearAllBtn = document.getElementById('clearAllBtn');
+  const toastContainer = document.getElementById('toastContainer');
+  const chartLegend = document.getElementById('chartLegend');
+  const chartCanvas = document.getElementById('chartCanvas');
+  const chartCtx = chartCanvas.getContext('2d');
+
+  // ---- Toast ----
+  function showToast(message) {
+    const el = document.createElement('div');
+    el.className = 'toast';
+    el.textContent = message;
+    toastContainer.appendChild(el);
+    requestAnimationFrame(() => el.classList.add('show'));
+    setTimeout(() => {
+      el.classList.remove('show');
+      setTimeout(() => el.remove(), 250);
+    }, 3500);
+  }
+
+  // ---- Status ----
+  function setStatus(state) {
+    // state: 'disconnected' | 'connecting' | 'connected'
+    statusDot.className = 'dot' + (state === 'connected' ? ' connected' : state === 'connecting' ? ' connecting' : '');
+    statusText.textContent = state === 'connected' ? 'Connected' : state === 'connecting' ? 'Connecting…' : 'Disconnected';
+    connectBtn.textContent = state === 'connected' ? 'Disconnect' : 'Connect Serial';
+    connectBtn.disabled = state === 'connecting';
+    startStopBtn.disabled = state !== 'connected';
+    if (state !== 'connected' && isLogging) {
+      stopLogging();
+    }
+  }
+
+  // ---- Field labels ----
+  function renderFieldLabelsGrid() {
+    fieldLabelsGrid.innerHTML = '';
+    fieldLabels.forEach((label, i) => {
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.value = label;
+      input.dataset.index = String(i);
+      input.addEventListener('input', () => {
+        fieldLabels[i] = input.value || ('Field_' + (i + 1));
+        updateHeaderCell(i);
+        renderChartLegend();
+      });
+      fieldLabelsGrid.appendChild(input);
+    });
+  }
+
+  function setNumFields(n) {
+    n = Math.max(1, Math.min(20, n | 0));
+    const newLabels = [];
+    for (let i = 0; i < n; i++) {
+      newLabels.push(fieldLabels[i] || ('Field_' + (i + 1)));
+    }
+    fieldLabels = newLabels;
+    numFieldsEl.value = String(n);
+    visibleFields = new Set(fieldLabels.map((_, i) => i));
+    renderFieldLabelsGrid();
+    renderTableHead();
+    renderChartLegend();
+    fullRerenderTable();
+    syncLiveMonitorHeight();
+  }
+
+  numFieldsEl.addEventListener('change', () => {
+    setNumFields(parseInt(numFieldsEl.value, 10) || 1);
+  });
+
+  // ---- Table rendering ----
+  function renderTableHead() {
+    tableHeadRow.innerHTML = '';
+    const selectTh = document.createElement('th');
+    selectTh.style.width = '28px';
+    tableHeadRow.appendChild(selectTh);
+    const idxTh = document.createElement('th');
+    idxTh.textContent = '#';
+    idxTh.style.width = '40px';
+    tableHeadRow.appendChild(idxTh);
+    fieldLabels.forEach((label, i) => {
+      const th = document.createElement('th');
+      th.textContent = label;
+      th.dataset.colIndex = String(i);
+      tableHeadRow.appendChild(th);
+    });
+    const delTh = document.createElement('th');
+    delTh.style.width = '36px';
+    tableHeadRow.appendChild(delTh);
+  }
+
+  function updateHeaderCell(i) {
+    const th = tableHeadRow.querySelector('th[data-col-index="' + i + '"]');
+    if (th) th.textContent = fieldLabels[i];
+  }
+
+  function renderRow(row, index) {
+    const tr = document.createElement('tr');
+    tr.dataset.rowIndex = String(index);
+
+    const selectTd = document.createElement('td');
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.checked = selectedRows.has(index);
+    checkbox.addEventListener('change', () => {
+      if (checkbox.checked) selectedRows.add(index);
+      else selectedRows.delete(index);
+      deleteSelectedBtn.disabled = selectedRows.size === 0;
+    });
+    selectTd.appendChild(checkbox);
+    tr.appendChild(selectTd);
+
+    const idxTd = document.createElement('td');
+    idxTd.textContent = String(index + 1);
+    tr.appendChild(idxTd);
+
+    for (let i = 0; i < fieldLabels.length; i++) {
+      const td = document.createElement('td');
+      td.textContent = row[i] !== undefined ? row[i] : '';
+      tr.appendChild(td);
+    }
+
+    const delTd = document.createElement('td');
+    const delBtn = document.createElement('button');
+    delBtn.className = 'row-del-btn';
+    delBtn.textContent = '✕';
+    delBtn.title = 'Delete this row';
+    delBtn.addEventListener('click', () => deleteRow(index));
+    delTd.appendChild(delBtn);
+    tr.appendChild(delTd);
+
+    return tr;
+  }
+
+  // Incoming rows are queued and flushed to the DOM once per animation
+  // frame (batched), instead of one appendChild + forced layout read per
+  // row. At high sample rates, doing this per-row makes each row more
+  // expensive as the table grows (forced synchronous layout), which
+  // eventually falls behind the incoming serial stream and causes lag /
+  // stalls. Data capture itself (the `data` array) is never gated on
+  // this -- only the visible table's rendering is deferred.
+  function queueRowForTable(row) {
+    pendingRows.push(row);
+    scheduleTableFlush();
+  }
+
+  function scheduleTableFlush() {
+    if (tableFlushScheduled) return;
+    tableFlushScheduled = true;
+    requestAnimationFrame(flushPendingRows);
+  }
+
+  function flushPendingRows() {
+    tableFlushScheduled = false;
+    if (pendingRows.length === 0) return;
+    const startIndex = data.length - pendingRows.length;
+    const frag = document.createDocumentFragment();
+    pendingRows.forEach((row, offset) => {
+      frag.appendChild(renderRow(row, startIndex + offset));
+    });
+    tableBody.appendChild(frag);
+    pendingRows = [];
+    autoScrollIfNeeded();
+  }
+
+  function autoScrollIfNeeded() {
+    const scrollEl = tableBody.closest('.table-scroll');
+    if (!scrollEl) return;
+    const nearBottom = scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight < 60;
+    if (nearBottom) scrollEl.scrollTop = scrollEl.scrollHeight;
+  }
+
+  function fullRerenderTable() {
+    // Any rows still queued from queueRowForTable() are already reflected
+    // in `data` (pushed there immediately) and will be rendered by this
+    // full rebuild, so drop them to avoid a stale/duplicate flush later.
+    pendingRows = [];
+    tableBody.innerHTML = '';
+    const frag = document.createDocumentFragment();
+    data.forEach((row, i) => frag.appendChild(renderRow(row, i)));
+    tableBody.appendChild(frag);
+    updateCounters();
+    scheduleChartRender();
+  }
+
+  function updateCounters() {
+    rowCounter.textContent = data.length + (data.length === 1 ? ' row captured' : ' rows captured');
+    emptyState.hidden = data.length !== 0;
+    downloadBtn.disabled = data.length === 0;
+    clearAllBtn.disabled = data.length === 0;
+    deleteSelectedBtn.disabled = selectedRows.size === 0;
+  }
+
+  function deleteRow(index) {
+    data.splice(index, 1);
+    selectedRows.delete(index);
+    // Shift down any selected indices above the removed one
+    const shifted = new Set();
+    selectedRows.forEach(i => shifted.add(i > index ? i - 1 : i));
+    selectedRows = shifted;
+    fullRerenderTable();
+  }
+
+  deleteSelectedBtn.addEventListener('click', () => {
+    if (selectedRows.size === 0) return;
+    data = data.filter((_, i) => !selectedRows.has(i));
+    selectedRows = new Set();
+    fullRerenderTable();
+  });
+
+  clearAllBtn.addEventListener('click', () => {
+    if (data.length === 0) return;
+    const confirmed = window.confirm('Clear all ' + data.length + ' captured rows? This cannot be undone.');
+    if (!confirmed) return;
+    data = [];
+    selectedRows = new Set();
+    fullRerenderTable();
+  });
+
+  // ---- Chart ----
+  function renderChartLegend() {
+    chartLegend.innerHTML = '';
+    fieldLabels.forEach((label, i) => {
+      const chip = document.createElement('div');
+      chip.className = 'chart-legend-chip' + (visibleFields.has(i) ? '' : ' off');
+      const swatch = document.createElement('span');
+      swatch.className = 'chart-legend-swatch';
+      swatch.style.background = CHART_COLORS[i % CHART_COLORS.length];
+      chip.appendChild(swatch);
+      const text = document.createElement('span');
+      text.textContent = label;
+      chip.appendChild(text);
+      chip.addEventListener('click', () => {
+        if (visibleFields.has(i)) visibleFields.delete(i);
+        else visibleFields.add(i);
+        renderChartLegend();
+        scheduleChartRender();
+      });
+      chartLegend.appendChild(chip);
+    });
+  }
+
+  function scheduleChartRender() {
+    if (chartRenderScheduled) return;
+    chartRenderScheduled = true;
+    requestAnimationFrame(() => {
+      chartRenderScheduled = false;
+      renderChart();
+    });
+  }
+
+  /** Maps a canvas pixel x-coordinate back to the nearest original row index. */
+  function chartXToIndex(pixelX) {
+    if (data.length === 0) return 0;
+    const w = chartCanvas.width || 1;
+    const fraction = Math.min(1, Math.max(0, pixelX / w));
+    return Math.round(fraction * (data.length - 1));
+  }
+
+  function renderChart() {
+    // Match the canvas drawing buffer to its displayed CSS size.
+    const cssWidth = chartCanvas.clientWidth || 600;
+    const cssHeight = chartCanvas.clientHeight || 260;
+    if (chartCanvas.width !== cssWidth) chartCanvas.width = cssWidth;
+    if (chartCanvas.height !== cssHeight) chartCanvas.height = cssHeight;
+    const w = chartCanvas.width;
+    const h = chartCanvas.height;
+    const pad = 8;
+
+    chartCtx.clearRect(0, 0, w, h);
+
+    if (data.length === 0) {
+      chartCtx.fillStyle = '#9aa1ab';
+      chartCtx.font = '13px -apple-system, sans-serif';
+      chartCtx.fillText('No data yet -- start logging to see the chart.', 12, h / 2);
+      return;
+    }
+
+    // Decimate for performance on long recordings; keep contiguous buckets
+    // so drag-selection still maps to a meaningful contiguous row range.
+    const step = Math.max(1, Math.ceil(data.length / MAX_CHART_POINTS));
+    const pointCount = Math.ceil(data.length / step);
+    const xForPoint = (i) => (pointCount <= 1) ? 0 : (i / (pointCount - 1)) * w;
+
+    // Selection / drag highlight (drawn first, underneath the lines)
+    let selStart = null, selEnd = null;
+    if (chartDrag) {
+      selStart = Math.min(chartDrag.startIndex, chartDrag.currentIndex);
+      selEnd = Math.max(chartDrag.startIndex, chartDrag.currentIndex);
+    } else if (selectedRows.size > 0) {
+      selStart = Math.min(...selectedRows);
+      selEnd = Math.max(...selectedRows);
+    }
+    if (selStart !== null) {
+      const x1 = (selStart / Math.max(1, data.length - 1)) * w;
+      const x2 = (selEnd / Math.max(1, data.length - 1)) * w;
+      chartCtx.fillStyle = 'rgba(37, 99, 235, 0.12)';
+      chartCtx.fillRect(x1, 0, Math.max(1, x2 - x1), h);
+    }
+
+    fieldLabels.forEach((label, fieldIndex) => {
+      if (!visibleFields.has(fieldIndex)) return;
+
+      const series = new Array(pointCount);
+      for (let p = 0; p < pointCount; p++) {
+        const origIndex = Math.min(data.length - 1, p * step);
+        const raw = data[origIndex][fieldIndex];
+        const num = parseFloat(raw);
+        series[p] = Number.isFinite(num) ? num : 0;
+      }
+      let min = Math.min(...series);
+      let max = Math.max(...series);
+      if (min === max) { min -= 1; max += 1; }
+
+      chartCtx.strokeStyle = CHART_COLORS[fieldIndex % CHART_COLORS.length];
+      chartCtx.lineWidth = 1.5;
+      chartCtx.beginPath();
+      for (let p = 0; p < pointCount; p++) {
+        const x = xForPoint(p);
+        const norm = (series[p] - min) / (max - min); // 0..1
+        const y = h - pad - norm * (h - pad * 2);
+        if (p === 0) chartCtx.moveTo(x, y);
+        else chartCtx.lineTo(x, y);
+      }
+      chartCtx.stroke();
+    });
+  }
+
+  chartCanvas.addEventListener('mousedown', (e) => {
+    if (data.length === 0) return;
+    const index = chartXToIndex(e.offsetX);
+    chartDrag = { startIndex: index, currentIndex: index };
+    scheduleChartRender();
+  });
+  chartCanvas.addEventListener('mousemove', (e) => {
+    if (!chartDrag) return;
+    chartDrag.currentIndex = chartXToIndex(e.offsetX);
+    scheduleChartRender();
+  });
+  function finishChartDrag() {
+    if (!chartDrag) return;
+    const start = Math.min(chartDrag.startIndex, chartDrag.currentIndex);
+    const end = Math.max(chartDrag.startIndex, chartDrag.currentIndex);
+    for (let i = start; i <= end; i++) selectedRows.add(i);
+    chartDrag = null;
+    fullRerenderTable();
+  }
+  chartCanvas.addEventListener('mouseup', finishChartDrag);
+  chartCanvas.addEventListener('mouseleave', () => {
+    if (chartDrag) finishChartDrag();
+  });
+  window.addEventListener('resize', scheduleChartRender);
+
+  // ---- Live monitor ----
+  const liveLines = [];
+  const LIVE_MONITOR_MAX_LINES = 200;
+  const leftColEl = document.querySelector('.left-col');
+  const liveMonitorPanelEl = document.querySelector('.live-monitor-panel');
+
+  // CSS grid's `align-items: stretch` alone is circular here: the live
+  // monitor panel has no independent height ceiling, so it grows with its
+  // own content, which grows the grid row, which grows the panel again.
+  // Measuring the left column's actual height and applying it directly
+  // breaks that loop -- the live monitor panel gets a real fixed height
+  // to scroll within, independent of how much text is inside it.
+  function syncLiveMonitorHeight() {
+    if (!leftColEl || !liveMonitorPanelEl) return;
+    if (window.innerWidth <= 860) {
+      liveMonitorPanelEl.style.height = ''; // stack naturally on narrow layouts
+      return;
+    }
+    liveMonitorPanelEl.style.height = leftColEl.offsetHeight + 'px';
+  }
+  window.addEventListener('resize', syncLiveMonitorHeight);
+  function pushLiveLine(line) {
+    liveLines.push(line);
+    if (liveLines.length > LIVE_MONITOR_MAX_LINES) liveLines.shift();
+    liveMonitor.textContent = liveLines.join('\n');
+    liveMonitor.scrollTop = liveMonitor.scrollHeight;
+  }
+
+  // ---- Incoming line handling ----
+  function handleLine(line) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) return;
+    pushLiveLine(trimmed);
+    if (!isLogging) return;
+    const values = trimmed.split(',').map(v => v.trim());
+    data.push(values);
+    queueRowForTable(values);
+    updateCounters();
+    scheduleChartRender();
+  }
+
+  // ---- Logging start/stop ----
+  function startLogging() {
+    isLogging = true;
+    startStopBtn.textContent = 'Stop Logging';
+    startStopBtn.classList.remove('state-start');
+    startStopBtn.classList.add('state-stop');
+  }
+  function stopLogging() {
+    isLogging = false;
+    startStopBtn.textContent = 'Start Logging';
+    startStopBtn.classList.remove('state-stop');
+    startStopBtn.classList.add('state-start');
+  }
+  startStopBtn.addEventListener('click', () => {
+    if (isLogging) stopLogging();
+    else startLogging();
+  });
+
+  // ---- CSV export ----
+  function csvEscape(value) {
+    const str = String(value ?? '');
+    if (/[",\n]/.test(str)) {
+      return '"' + str.replace(/"/g, '""') + '"';
+    }
+    return str;
+  }
+
+  function resolveFileName() {
+    let name = fileNameEl.value.trim();
+    if (!name) name = 'sensor_data';
+    if (!/\.csv$/i.test(name)) name += '.csv';
+    return name;
+  }
+
+  downloadBtn.addEventListener('click', () => {
+    const lines = [];
+    lines.push(fieldLabels.map(csvEscape).join(','));
+    data.forEach(row => {
+      lines.push(fieldLabels.map((_, i) => csvEscape(row[i] !== undefined ? row[i] : '')).join(','));
+    });
+    const csvText = lines.join('\n');
+    const blob = new Blob([csvText], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = resolveFileName();
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  });
+
+  // ---- Load an existing CSV for review/cleanup ----
+  loadCsvBtn.addEventListener('click', () => {
+    if (data.length > 0) {
+      const confirmed = window.confirm('Loading a CSV will replace the ' + data.length + ' currently captured rows. Continue?');
+      if (!confirmed) return;
+    }
+    loadCsvInput.click();
+  });
+
+  loadCsvInput.addEventListener('change', () => {
+    const file = loadCsvInput.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const lines = String(reader.result).split(/\r\n|\n|\r/).map(l => l.trim()).filter(l => l.length > 0);
+      if (lines.length < 1) {
+        showToast('That CSV appears to be empty.');
+        return;
+      }
+      fieldLabels = lines[0].split(',').map(s => s.trim());
+      data = lines.slice(1).map(line => line.split(',').map(v => v.trim()));
+      selectedRows = new Set();
+      numFieldsEl.value = String(Math.max(1, Math.min(20, fieldLabels.length)));
+      visibleFields = new Set(fieldLabels.map((_, i) => i));
+      renderFieldLabelsGrid();
+      renderTableHead();
+      renderChartLegend();
+      fullRerenderTable();
+      syncLiveMonitorHeight();
+      showToast('Loaded ' + data.length + ' rows from ' + file.name);
+    };
+    reader.readAsText(file);
+    loadCsvInput.value = '';
+  });
+
+  // ---- Serial connection ----
+  async function connectSerial() {
+    if (port) {
+      await disconnectSerial(false);
+      return;
+    }
+    try {
+      setStatus('connecting');
+      const selectedPort = await navigator.serial.requestPort();
+      const baudRate = parseInt(baudRateEl.value, 10) || 115200;
+      await selectedPort.open({ baudRate });
+      port = selectedPort;
+      setStatus('connected');
+      keepReading = true;
+      readLoop();
+    } catch (err) {
+      if (err && err.name === 'NotFoundError') {
+        // User cancelled the port picker -- not an error state.
+        setStatus('disconnected');
+        return;
+      }
+      console.warn('Serial connect failed:', err);
+      setStatus('disconnected');
+    }
+  }
+
+  async function readLoop() {
+    const textDecoder = new TextDecoderStream();
+    readableStreamClosed = port.readable.pipeTo(textDecoder.writable).catch(() => {});
+    reader = textDecoder.readable.getReader();
+    lineBuffer = '';
+    try {
+      while (keepReading) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        if (value) {
+          lineBuffer += value;
+          const parts = lineBuffer.split(/\r\n|\n|\r/);
+          lineBuffer = parts.pop();
+          for (const line of parts) handleLine(line);
+        }
+      }
+    } catch (err) {
+      console.warn('Serial read error:', err);
+      await handleUnexpectedDisconnect();
+      return;
+    } finally {
+      try { reader.releaseLock(); } catch (e) {}
+    }
+  }
+
+  async function disconnectSerial(unexpected) {
+    keepReading = false;
+    try {
+      if (reader) await reader.cancel();
+    } catch (e) {}
+    if (readableStreamClosed) {
+      try { await readableStreamClosed; } catch (e) {}
+    }
+    try {
+      if (port) await port.close();
+    } catch (e) {}
+    reader = null;
+    readableStreamClosed = null;
+    const wasLogging = isLogging;
+    port = null;
+    setStatus('disconnected');
+    if (unexpected) {
+      if (wasLogging) stopLogging();
+      showToast('Device disconnected — logging stopped. Captured data was kept.');
+    }
+  }
+
+  async function handleUnexpectedDisconnect() {
+    await disconnectSerial(true);
+  }
+
+  navigator.serial && navigator.serial.addEventListener('disconnect', (event) => {
+    if (port && event.target === port) {
+      handleUnexpectedDisconnect();
+    }
+  });
+
+  connectBtn.addEventListener('click', connectSerial);
+
+  // ---- Feature detection ----
+  if (!('serial' in navigator)) {
+    unsupportedBanner.hidden = false;
+    connectBtn.disabled = true;
+  }
+
+  // ---- Init ----
+  setNumFields(6);
+  renderTableHead();
+  updateCounters();
+  renderChart();
+  setStatus('disconnected');
+})();
+</script>
+</body>
+</html>

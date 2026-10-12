@@ -1,0 +1,530 @@
+<!doctype html>
+<!--
+  TinyML Model Trainer
+  ---------------------
+  Trains a small dense neural network classifier on CSV sensor/time-series
+  data entirely in the browser (TensorFlow.js), then exports it as a plain
+  C header file for embedding directly in firmware -- no TFLite Micro
+  runtime needed, just a hand-rolled forward pass over the exported float
+  arrays.
+
+  Everything runs client-side. Requires internet access once to load the
+  TensorFlow.js and Tailwind CDN scripts referenced below.
+-->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>TinyML Model Trainer</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js"></script>
+<style>
+  body { font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
+  .terminal {
+    background: #0f1115;
+    color: #9be89b;
+    font-family: ui-monospace, Consolas, monospace;
+    font-size: 12.5px;
+    white-space: pre-wrap;
+  }
+  .status-badge { transition: background 0.2s, color 0.2s; }
+</style>
+</head>
+<body class="bg-gray-100 text-gray-900">
+<div class="max-w-5xl mx-auto p-6">
+  <h1 class="text-xl font-bold mb-1">TinyML Model Trainer</h1>
+  <p class="text-sm text-gray-500 mb-6">Upload a CSV per class, train a small dense network in-browser, export a C header ready for firmware.</p>
+
+  <!-- Stats bar -->
+  <div class="bg-white border border-gray-200 rounded-lg p-4 mb-6 flex flex-wrap items-center gap-6 text-sm">
+    <div><span class="text-gray-500">Total samples:</span> <span id="statSamples" class="font-semibold">0</span></div>
+    <div><span class="text-gray-500">Features:</span> <span id="statFeatures" class="font-semibold">-</span></div>
+    <div><span class="text-gray-500">Classes:</span> <span id="statClasses" class="font-semibold">0</span></div>
+    <div class="ml-auto">
+      <span id="statusBadge" class="status-badge px-3 py-1 rounded-full text-xs font-semibold bg-gray-200 text-gray-600">Waiting for Data</span>
+    </div>
+  </div>
+
+  <!-- Classes -->
+  <div class="bg-white border border-gray-200 rounded-lg p-4 mb-6">
+    <div class="flex items-center justify-between mb-3">
+      <h2 class="text-sm font-semibold text-gray-500 uppercase tracking-wide">Classes</h2>
+      <button id="addClassBtn" class="bg-blue-600 hover:bg-blue-700 text-white text-sm px-3 py-1.5 rounded-md">+ Add Class</button>
+    </div>
+    <div id="classList" class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3"></div>
+    <div id="classError" class="text-sm text-red-600 mt-3 hidden"></div>
+  </div>
+
+  <!-- Hyperparameters -->
+  <div class="bg-white border border-gray-200 rounded-lg p-4 mb-6">
+    <h2 class="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-3">Hyperparameters</h2>
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div>
+        <label class="block text-xs text-gray-500 mb-1">Model name</label>
+        <input id="modelName" type="text" value="fall_detection_model" class="w-full border border-gray-300 rounded-md px-2 py-1.5 text-sm">
+      </div>
+      <div>
+        <label class="block text-xs text-gray-500 mb-1">Window size (samples)</label>
+        <input id="windowSize" type="number" min="1" max="500" value="5" class="w-full border border-gray-300 rounded-md px-2 py-1.5 text-sm">
+      </div>
+      <div>
+        <label class="block text-xs text-gray-500 mb-1">Epochs</label>
+        <input id="epochs" type="number" min="1" max="1000" value="30" class="w-full border border-gray-300 rounded-md px-2 py-1.5 text-sm">
+      </div>
+      <div>
+        <label class="block text-xs text-gray-500 mb-1">Learning rate</label>
+        <input id="learningRate" type="number" min="0.00001" max="1" step="0.0001" value="0.001" class="w-full border border-gray-300 rounded-md px-2 py-1.5 text-sm">
+      </div>
+    </div>
+    <button id="trainBtn" disabled class="mt-4 bg-green-600 hover:bg-green-700 disabled:bg-gray-300 disabled:cursor-not-allowed text-white text-sm px-4 py-2 rounded-md">Train Model</button>
+  </div>
+
+  <!-- Training log -->
+  <div class="bg-white border border-gray-200 rounded-lg p-4 mb-6">
+    <h2 class="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-3">Training Log</h2>
+    <div id="trainingLog" class="terminal rounded-md p-3 h-64 overflow-y-auto">Waiting to start training...</div>
+  </div>
+
+  <!-- Confusion Matrix -->
+  <div id="confusionPanel" class="bg-white border border-gray-200 rounded-lg p-4 mb-6 hidden">
+    <h2 class="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-1">Confusion Matrix (validation split)</h2>
+    <p class="text-xs text-gray-500 mb-3">Rows = actual class, columns = predicted class. Overall accuracy doesn't reveal which specific classes get confused with each other -- check this before trusting a model, especially for "fall" being missed.</p>
+    <div id="confusionWarning" class="hidden text-sm bg-red-50 border border-red-200 text-red-700 rounded-md p-2 mb-3"></div>
+    <div id="confusionTableWrap" class="overflow-x-auto"></div>
+  </div>
+
+  <!-- Export -->
+  <div id="exportPanel" class="bg-white border border-gray-200 rounded-lg p-4 hidden">
+    <h2 class="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-3">Export</h2>
+    <div class="flex flex-wrap gap-2">
+      <button id="exportTfjsBtn" class="bg-gray-700 hover:bg-gray-800 text-white text-sm px-3 py-2 rounded-md">Download TF.js Model</button>
+      <button id="exportLabelsBtn" class="bg-gray-700 hover:bg-gray-800 text-white text-sm px-3 py-2 rounded-md">Download Labels (.txt)</button>
+      <button id="exportHeaderBtn" class="bg-blue-600 hover:bg-blue-700 text-white text-sm px-3 py-2 rounded-md">Download C Header (.h)</button>
+      <button id="exportPyBtn" class="bg-gray-700 hover:bg-gray-800 text-white text-sm px-3 py-2 rounded-md">Download .tflite Converter Script (.py)</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  // ---- State ----
+  /** @type {{name: string, rows: number[][]}[]} */
+  let classes = [];
+  let featureCount = null;
+  let model = null;
+  let trainedMeta = null; // { windowSize, featureCount, labels, modelName }
+
+  // ---- DOM refs ----
+  const classList = document.getElementById('classList');
+  const addClassBtn = document.getElementById('addClassBtn');
+  const classError = document.getElementById('classError');
+  const statSamples = document.getElementById('statSamples');
+  const statFeatures = document.getElementById('statFeatures');
+  const statClasses = document.getElementById('statClasses');
+  const statusBadge = document.getElementById('statusBadge');
+  const modelNameEl = document.getElementById('modelName');
+  const windowSizeEl = document.getElementById('windowSize');
+  const epochsEl = document.getElementById('epochs');
+  const learningRateEl = document.getElementById('learningRate');
+  const trainBtn = document.getElementById('trainBtn');
+  const trainingLog = document.getElementById('trainingLog');
+  const exportPanel = document.getElementById('exportPanel');
+  const exportTfjsBtn = document.getElementById('exportTfjsBtn');
+  const exportLabelsBtn = document.getElementById('exportLabelsBtn');
+  const exportHeaderBtn = document.getElementById('exportHeaderBtn');
+  const exportPyBtn = document.getElementById('exportPyBtn');
+  const confusionPanel = document.getElementById('confusionPanel');
+  const confusionWarning = document.getElementById('confusionWarning');
+  const confusionTableWrap = document.getElementById('confusionTableWrap');
+
+  // ---- CSV parsing ----
+  function parseCsv(text) {
+    const lines = text.split(/\r\n|\n|\r/).map(l => l.trim()).filter(l => l.length > 0);
+    if (lines.length === 0) return [];
+    // Detect and skip a header row (any non-numeric cell in the first line).
+    const firstCells = lines[0].split(',');
+    const firstIsHeader = firstCells.some(c => c.trim() !== '' && Number.isNaN(parseFloat(c)));
+    const dataLines = firstIsHeader ? lines.slice(1) : lines;
+    return dataLines.map(line => line.split(',').map(c => parseFloat(c.trim())));
+  }
+
+  // ---- Class cards ----
+  function addClass() {
+    const index = classes.length;
+    classes.push({ name: 'class_' + (index + 1), rows: [] });
+    renderClassList();
+  }
+
+  function removeClass(index) {
+    classes.splice(index, 1);
+    if (classes.length === 0) featureCount = null;
+    renderClassList();
+    updateStats();
+  }
+
+  function renderClassList() {
+    classList.innerHTML = '';
+    classes.forEach((cls, index) => {
+      const card = document.createElement('div');
+      card.className = 'border border-gray-200 rounded-md p-3 flex flex-col gap-2';
+
+      const nameRow = document.createElement('div');
+      nameRow.className = 'flex items-center gap-2';
+      const nameInput = document.createElement('input');
+      nameInput.type = 'text';
+      nameInput.value = cls.name;
+      nameInput.className = 'flex-1 border border-gray-300 rounded px-2 py-1 text-sm';
+      nameInput.addEventListener('input', () => { cls.name = nameInput.value || cls.name; });
+      const removeBtn = document.createElement('button');
+      removeBtn.textContent = '✕';
+      removeBtn.className = 'text-red-500 hover:bg-red-50 rounded px-2 py-1 text-sm';
+      removeBtn.addEventListener('click', () => removeClass(index));
+      nameRow.appendChild(nameInput);
+      nameRow.appendChild(removeBtn);
+
+      const fileInput = document.createElement('input');
+      fileInput.type = 'file';
+      fileInput.accept = '.csv,text/csv';
+      fileInput.className = 'text-xs';
+      fileInput.addEventListener('change', () => handleCsvUpload(fileInput, cls, countLabel));
+
+      const countLabel = document.createElement('div');
+      countLabel.className = 'text-xs text-gray-500';
+      countLabel.textContent = cls.rows.length + ' samples';
+
+      card.appendChild(nameRow);
+      card.appendChild(fileInput);
+      card.appendChild(countLabel);
+      classList.appendChild(card);
+    });
+  }
+
+  function handleCsvUpload(fileInput, cls, countLabel) {
+    const file = fileInput.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const rows = parseCsv(String(reader.result));
+      const thisFeatureCount = rows.length > 0 ? rows[0].length : 0;
+      if (rows.length === 0 || thisFeatureCount === 0) {
+        showClassError('That CSV has no usable numeric rows.');
+        return;
+      }
+      const mismatched = rows.some(r => r.length !== thisFeatureCount || r.some(v => Number.isNaN(v)));
+      if (mismatched) {
+        showClassError('That CSV has inconsistent column counts or non-numeric values.');
+        return;
+      }
+      if (featureCount === null) {
+        featureCount = thisFeatureCount;
+      } else if (featureCount !== thisFeatureCount) {
+        showClassError('Feature count mismatch: this file has ' + thisFeatureCount + ' columns, but other classes have ' + featureCount + '. All classes must share the same number of feature columns.');
+        return;
+      }
+      hideClassError();
+      cls.rows = rows;
+      countLabel.textContent = rows.length + ' samples';
+      updateStats();
+    };
+    reader.readAsText(file);
+  }
+
+  function showClassError(msg) {
+    classError.textContent = msg;
+    classError.classList.remove('hidden');
+  }
+  function hideClassError() {
+    classError.classList.add('hidden');
+  }
+
+  addClassBtn.addEventListener('click', addClass);
+
+  // ---- Stats / readiness ----
+  function updateStats() {
+    const totalSamples = classes.reduce((sum, c) => sum + c.rows.length, 0);
+    statSamples.textContent = String(totalSamples);
+    statFeatures.textContent = featureCount === null ? '-' : String(featureCount);
+    statClasses.textContent = String(classes.length);
+
+    const windowSize = parseInt(windowSizeEl.value, 10) || 1;
+    const ready = classes.length >= 2 && classes.every(c => c.rows.length > windowSize);
+    statusBadge.textContent = ready ? 'Ready to Train' : 'Waiting for Data';
+    statusBadge.className = 'status-badge px-3 py-1 rounded-full text-xs font-semibold ' +
+      (ready ? 'bg-green-100 text-green-700' : 'bg-gray-200 text-gray-600');
+    trainBtn.disabled = !ready;
+  }
+  windowSizeEl.addEventListener('input', updateStats);
+
+  // ---- Windowing ----
+  function buildWindowedDataset(windowSize) {
+    const X = [];
+    const yIndices = [];
+    classes.forEach((cls, classIndex) => {
+      for (let start = 0; start + windowSize <= cls.rows.length; start++) {
+        const window = cls.rows.slice(start, start + windowSize);
+        X.push(window.flat());
+        yIndices.push(classIndex);
+      }
+    });
+
+    // Shuffle X/yIndices together before returning. Windows are built
+    // class-by-class in sequence above, so without this, tf.js's
+    // `validationSplit` (which carves its slice off the *end* of the
+    // array before any epoch shuffling happens) would validate almost
+    // entirely on whichever class(es) happen to be last -- not a
+    // representative mix of all classes.
+    for (let i = X.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [X[i], X[j]] = [X[j], X[i]];
+      [yIndices[i], yIndices[j]] = [yIndices[j], yIndices[i]];
+    }
+
+    return { X, yIndices };
+  }
+
+  function logLine(text) {
+    trainingLog.textContent += '\n' + text;
+    trainingLog.scrollTop = trainingLog.scrollHeight;
+  }
+
+  // ---- Confusion matrix ----
+  function renderConfusionMatrix(confusion, labels) {
+    confusionPanel.classList.remove('hidden');
+
+    const table = document.createElement('table');
+    table.className = 'text-sm border-collapse';
+
+    const headRow = document.createElement('tr');
+    headRow.appendChild(document.createElement('th'));
+    labels.forEach(label => {
+      const th = document.createElement('th');
+      th.textContent = label;
+      th.className = 'px-3 py-1.5 text-left text-xs text-gray-500 font-medium';
+      headRow.appendChild(th);
+    });
+    table.appendChild(headRow);
+
+    confusion.forEach((row, actualIndex) => {
+      const tr = document.createElement('tr');
+      const rowHead = document.createElement('th');
+      rowHead.textContent = labels[actualIndex];
+      rowHead.className = 'px-3 py-1.5 text-left text-xs text-gray-500 font-medium whitespace-nowrap';
+      tr.appendChild(rowHead);
+      row.forEach((count, predictedIndex) => {
+        const td = document.createElement('td');
+        td.textContent = String(count);
+        const isDiagonal = actualIndex === predictedIndex;
+        td.className = 'px-3 py-1.5 text-center border border-gray-200 ' +
+          (isDiagonal ? 'bg-green-50 text-green-800 font-semibold' : (count > 0 ? 'bg-red-50 text-red-700' : 'text-gray-400'));
+        tr.appendChild(td);
+      });
+      table.appendChild(tr);
+    });
+
+    confusionTableWrap.innerHTML = '';
+    confusionTableWrap.appendChild(table);
+
+    // Call out any class whose name contains "fall" specifically, since
+    // that's the one this project can't afford to miss.
+    const fallIndex = labels.findIndex(l => l.toLowerCase().includes('fall'));
+    if (fallIndex !== -1) {
+      const fallRow = confusion[fallIndex];
+      const fallTotal = fallRow.reduce((a, b) => a + b, 0);
+      const fallCorrect = fallRow[fallIndex];
+      const fallMissed = fallTotal - fallCorrect;
+      if (fallTotal === 0) {
+        confusionWarning.textContent = 'No "' + labels[fallIndex] + '" samples landed in this validation split -- can\'t assess fall-detection reliability from this run.';
+        confusionWarning.classList.remove('hidden');
+      } else if (fallMissed > 0) {
+        confusionWarning.textContent = fallMissed + ' of ' + fallTotal + ' "' + labels[fallIndex] + '" validation samples were misclassified as something else. Per the PRD, missed falls are the priority to eliminate, over overall accuracy.';
+        confusionWarning.classList.remove('hidden');
+      } else {
+        confusionWarning.classList.add('hidden');
+      }
+    } else {
+      confusionWarning.classList.add('hidden');
+    }
+  }
+
+  // ---- Training ----
+  trainBtn.addEventListener('click', async () => {
+    trainBtn.disabled = true;
+    exportPanel.classList.add('hidden');
+    confusionPanel.classList.add('hidden');
+    trainingLog.textContent = 'Preparing dataset...';
+
+    const windowSize = parseInt(windowSizeEl.value, 10) || 1;
+    const epochs = parseInt(epochsEl.value, 10) || 30;
+    const learningRate = parseFloat(learningRateEl.value) || 0.001;
+    const labels = classes.map(c => c.name);
+    const numClasses = labels.length;
+
+    const { X, yIndices } = buildWindowedDataset(windowSize);
+    logLine('Built ' + X.length + ' windowed samples (window=' + windowSize + ', features=' + featureCount + ', inputDim=' + (windowSize * featureCount) + ').');
+
+    const VALIDATION_SPLIT = 0.2;
+    const xs = tf.tensor2d(X);
+    const ys = tf.oneHot(tf.tensor1d(yIndices, 'int32'), numClasses);
+
+    model = tf.sequential();
+    model.add(tf.layers.dense({ units: 16, activation: 'relu', inputShape: [windowSize * featureCount] }));
+    model.add(tf.layers.dense({ units: 8, activation: 'relu' }));
+    model.add(tf.layers.dense({ units: numClasses, activation: 'softmax' }));
+    model.compile({
+      optimizer: tf.train.adam(learningRate),
+      loss: 'categoricalCrossentropy',
+      metrics: ['accuracy'],
+    });
+
+    logLine('Training started...');
+    await model.fit(xs, ys, {
+      epochs,
+      validationSplit: VALIDATION_SPLIT,
+      shuffle: true,
+      callbacks: {
+        onEpochEnd: (epoch, logs) => {
+          logLine(
+            'Epoch ' + (epoch + 1) + '/' + epochs +
+            ' - loss: ' + logs.loss.toFixed(4) +
+            ' - acc: ' + logs.acc.toFixed(4) +
+            ' - val_loss: ' + logs.val_loss.toFixed(4) +
+            ' - val_acc: ' + logs.val_acc.toFixed(4)
+          );
+        },
+      },
+    });
+    logLine('Training complete.');
+
+    // Recompute the same validation slice tf.js used internally (the
+    // last VALIDATION_SPLIT fraction of the -- now pre-shuffled --
+    // samples) to build a confusion matrix, since overall accuracy
+    // alone can hide a specific class (e.g. "fall") being missed.
+    const numValSamples = Math.floor(X.length * VALIDATION_SPLIT);
+    const valStart = X.length - numValSamples;
+    const valXs = xs.slice([valStart, 0], [numValSamples, -1]);
+    const valActual = yIndices.slice(valStart);
+    const valPredicted = Array.from(model.predict(valXs).argMax(-1).dataSync());
+    valXs.dispose();
+
+    const confusion = Array.from({ length: numClasses }, () => new Array(numClasses).fill(0));
+    for (let i = 0; i < valActual.length; i++) {
+      confusion[valActual[i]][valPredicted[i]]++;
+    }
+    renderConfusionMatrix(confusion, labels);
+
+    xs.dispose();
+    ys.dispose();
+
+    trainedMeta = { windowSize, featureCount, labels, modelName: modelNameEl.value.trim() || 'model' };
+    exportPanel.classList.remove('hidden');
+    trainBtn.disabled = false;
+  });
+
+  // ---- Export: TF.js model ----
+  exportTfjsBtn.addEventListener('click', async () => {
+    if (!model || !trainedMeta) return;
+    await model.save('downloads://' + trainedMeta.modelName);
+  });
+
+  // ---- Export: labels.txt ----
+  exportLabelsBtn.addEventListener('click', () => {
+    if (!trainedMeta) return;
+    downloadBlob(trainedMeta.labels.join('\n') + '\n', trainedMeta.modelName + '_labels.txt', 'text/plain');
+  });
+
+  // ---- Export: C header ----
+  exportHeaderBtn.addEventListener('click', () => {
+    if (!model || !trainedMeta) return;
+    const header = buildCHeader(model, trainedMeta);
+    downloadBlob(header, trainedMeta.modelName + '_data.h', 'text/plain');
+  });
+
+  function buildCHeader(model, meta) {
+    const denseLayers = model.layers;
+    const inputFeatures = meta.windowSize * meta.featureCount;
+
+    let out = '';
+    out += '/*\n';
+    out += ' * TinyML Model Trainer - Model Header (Windowed)\n';
+    out += ' * Generated: ' + new Date().toLocaleString() + '\n';
+    out += ' * Pattern Length (Window): ' + meta.windowSize + '\n';
+    out += ' *\n';
+    out += ' * Weight layout: for a dense layer with inputDim -> outputDim,\n';
+    out += ' * layerN_weights is flattened row-major as [inputDim][outputDim],\n';
+    out += ' * i.e. weight for input i, output j is at index (i * outputDim + j).\n';
+    out += ' */\n\n';
+    out += '#ifndef MODEL_DATA_H\n#define MODEL_DATA_H\n\n';
+    out += '#define INPUT_FEATURES ' + inputFeatures + '\n';
+    out += '#define SENSOR_CHANNELS ' + meta.featureCount + '\n';
+    out += '#define WINDOW_SIZE ' + meta.windowSize + '\n';
+    out += '#define OUTPUT_CLASSES ' + meta.labels.length + '\n\n';
+
+    denseLayers.forEach((layer, i) => {
+      const [kernel, bias] = layer.getWeights();
+      const kernelData = Array.from(kernel.dataSync());
+      const biasData = Array.from(bias.dataSync());
+      const [inputDim, outputDim] = kernel.shape;
+      out += '// Layer ' + i + ': ' + layer.name + ' (' + inputDim + ' -> ' + outputDim + ')\n';
+      out += 'const float layer' + i + '_weights[] = { ' + kernelData.join(', ') + ' };\n';
+      out += 'const float layer' + i + '_biases[] = { ' + biasData.join(', ') + ' };\n\n';
+    });
+
+    out += 'const char* LABELS[] = { ' + meta.labels.map(l => '"' + l + '"').join(', ') + ' };\n\n';
+    out += '#endif // MODEL_DATA_H\n';
+    return out;
+  }
+
+  // ---- Export: Python .tflite converter script ----
+  exportPyBtn.addEventListener('click', () => {
+    if (!trainedMeta) return;
+    const script = buildPythonScript(trainedMeta);
+    downloadBlob(script, trainedMeta.modelName + '_to_tflite.py', 'text/x-python');
+  });
+
+  function buildPythonScript(meta) {
+    return [
+      '# Converts the downloaded TF.js model (' + meta.modelName + '.json + weights) to a .tflite file.',
+      '# Requires: pip install tensorflowjs tensorflow',
+      '#',
+      '# Usage: python ' + meta.modelName + '_to_tflite.py',
+      '# Expects ' + meta.modelName + '.json and its .bin weight file(s) in the same directory.',
+      '',
+      'import tensorflowjs as tfjs',
+      'import tensorflow as tf',
+      '',
+      "MODEL_NAME = '" + meta.modelName + "'",
+      '',
+      "keras_model = tfjs.converters.load_keras_model(f'{MODEL_NAME}.json')",
+      '',
+      'converter = tf.lite.TFLiteConverter.from_keras_model(keras_model)',
+      'tflite_model = converter.convert()',
+      '',
+      "with open(f'{MODEL_NAME}.tflite', 'wb') as f:",
+      '    f.write(tflite_model)',
+      '',
+      "print(f'Wrote {MODEL_NAME}.tflite')",
+      '',
+    ].join('\n');
+  }
+
+  function downloadBlob(content, filename, mimeType) {
+    const blob = new Blob([content], { type: mimeType + ';charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  // ---- Init ----
+  addClass();
+  addClass();
+  updateStats();
+})();
+</script>
+</body>
+</html>
