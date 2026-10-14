@@ -1,0 +1,44 @@
+{
+  "expo": {
+    "name": "MineSafe AI",
+    "slug": "minesafe-ai",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "scheme": "minesafe",
+    "backgroundColor": "#060a11",
+    "splash": {
+      "backgroundColor": "#060a11",
+      "resizeMode": "contain"
+    },
+    "assetBundlePatterns": ["**/*"],
+    "android": {
+      "package": "com.ece.minesafeai",
+      "permissions": [
+        "VIBRATE",
+        "POST_NOTIFICATIONS",
+        "WAKE_LOCK",
+        "ACCESS_NETWORK_STATE"
+      ],
+      "useNextNotificationsApi": true,
+      "adaptiveIcon": {
+        "backgroundColor": "#0c131f"
+      }
+    },
+    "extra": {
+      "apiBaseUrl": "http://192.168.1.50:3000",
+      "eas": {
+        "projectId": ""
+      }
+    },
+    "plugins": [
+      [
+        "expo-notifications",
+        {
+          "color": "#ef4444",
+          "mode": "production"
+        }
+      ]
+    ]
+  }
+}

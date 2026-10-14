@@ -1,0 +1,14 @@
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Build / runtime artifacts
+.next/
+node_modules/
+.vscode/
+*.log
+*.tsbuildinfo
+
+# Nested repo/worktree not part of this project
+minesafe/
