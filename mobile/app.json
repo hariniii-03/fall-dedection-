@@ -1,0 +1,1 @@
+{"expo":{"name":"MineSafe AI","slug":"minesafe-ai","version":"0.1.0","orientation":"portrait","userInterfaceStyle":"dark","android":{"package":"com.minesafe.ai","permissions":["NOTIFICATIONS"]},"plugins":["expo-secure-store","expo-notifications"]}}
